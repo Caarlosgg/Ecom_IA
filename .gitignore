@@ -1,0 +1,12 @@
+# Entorno virtual
+venv/
+.env
+
+# Datos y modelos (no se suelen subir si son muy pesados)
+data/*.parquet
+data/*.csv
+data/*.pkl
+
+# Python
+__pycache__/
+*.py[cod]
