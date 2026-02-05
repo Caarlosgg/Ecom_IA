@@ -1,117 +1,193 @@
 import pandas as pd
 import numpy as np
-from sklearn.cluster import BisectingKMeans
-from sklearn.decomposition import PCA
-from sklearn.metrics import silhouette_score, calinski_harabasz_score, classification_report
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import ExtraTreesClassifier
 import os
 import joblib
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-def train_and_evaluate():
-    path_processed = "data/rfm_processed.csv"
-    path_metrics = "data/rfm_original_metrics.csv"
+# Librerías Científicas Avanzadas
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier, IsolationForest
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import silhouette_score, calinski_harabasz_score
+from sklearn.metrics.pairwise import euclidean_distances
 
-    if not os.path.exists(path_processed):
-        print("❌ Error: Ejecuta data_processor.py primero.")
+# Configuración visual para reportes
+plt.style.use('dark_background')
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 1000)
+
+def train_advanced_model():
+    print("\n" + "█"*80)
+    print("🧠  NEXUS AI TRAINER v3.0 | MODO: CIENTÍFICO AVANZADO")
+    print("█"*80 + "\n")
+    
+    # -------------------------------------------------------------------------
+    # 1. CARGA Y VALIDACIÓN
+    # -------------------------------------------------------------------------
+    PATH_PROCESSED = "data/rfm_processed.csv"
+    PATH_ORIGINAL = "data/rfm_original_metrics.csv"
+    
+    if not os.path.exists(PATH_PROCESSED):
+        print("❌ Error: Faltan datos procesados.")
         return
 
-    # 1. CARGA DE DATOS
-    data = pd.read_csv(path_processed, index_col=0)
-    original_metrics = pd.read_csv(path_metrics, index_col=0)
-    
-    # 2. OPTIMIZACIÓN DE DIMENSIONALIDAD (PCA)
-    # Usamos 3 componentes pero aseguramos que la varianza explicada sea suficiente
-    pca = PCA(n_components=3, random_state=42)
-    data_pca = pca.fit_transform(data)
-    var_explicada = np.sum(pca.explained_variance_ratio_)
-    
-    # 3. CLUSTERING JERÁRQUICO (BisectingKMeans)
-    # Aumentamos n_init para evitar mínimos locales y asegurar grupos estables
-    model = BisectingKMeans(
-        n_clusters=4, 
-        init='k-means++', 
-        n_init=100,      # Mayor estabilidad
-        bisecting_strategy='biggest_inertia', 
-        random_state=42
-    )
-    raw_clusters = model.fit_predict(data_pca)
+    print("📂 Ingestando datos...")
+    data_ai = pd.read_csv(PATH_PROCESSED, index_col=0)
+    data_human = pd.read_csv(PATH_ORIGINAL, index_col=0)
+    print(f"   -> Dataset Inicial: {len(data_ai)} clientes")
 
-    # 4. LÓGICA DE RE-RANKING PROFESIONAL
-    # No usamos solo Monetary; usamos un Score combinado para evitar errores de clasificación
-    # Un Diamante debe ser alto en Monetary y Frequency
-    original_metrics['Temp_Cluster'] = raw_clusters
+    # -------------------------------------------------------------------------
+    # 2. DETECCIÓN DE ANOMALÍAS (ISOLATION FOREST) - NUEVO!
+    # -------------------------------------------------------------------------
+    # Antes de segmentar, eliminamos el ruido. Clientes con comportamientos matemáticamente
+    # absurdos o extremos que distorsionan los promedios.
+    print("\n🛡️  Ejecutando Protocolo de Limpieza (Isolation Forest)...")
     
-    # Calculamos la mediana para no dejarnos engañar por outliers
-    cluster_profile = original_metrics.groupby('Temp_Cluster').agg({
+    iso = IsolationForest(contamination=0.02, random_state=42) # Eliminamos el 2% más raro
+    outliers = iso.fit_predict(data_ai)
+    
+    # Filtramos los datos (1 = Normal, -1 = Outlier)
+    clean_mask = outliers != -1
+    
+    data_ai_clean = data_ai[clean_mask]
+    data_human_clean = data_human[clean_mask]
+    
+    removed = len(data_ai) - len(data_ai_clean)
+    print(f"   -> Outliers detectados y eliminados: {removed}")
+    print(f"   -> Dataset Limpio para Entrenamiento: {len(data_ai_clean)} clientes")
+
+    # -------------------------------------------------------------------------
+    # 3. PCA OPTIMIZADO
+    # -------------------------------------------------------------------------
+    print("\n🔭 Proyectando Espacio Vectorial (PCA)...")
+    pca = PCA(n_components=3, random_state=42)
+    data_pca = pca.fit_transform(data_ai_clean)
+    
+    var_ratio = np.sum(pca.explained_variance_ratio_)
+    print(f"   -> Retención de Información: {var_ratio:.2%}")
+
+    # -------------------------------------------------------------------------
+    # 4. K-MEANS DE ALTA PRECISIÓN
+    # -------------------------------------------------------------------------
+    print("\n🤖 Entrenando Núcleo de Segmentación (K=4)...")
+    
+    # max_iter=500 y n_init=50 para asegurar convergencia absoluta
+    kmeans = KMeans(n_clusters=4, init='k-means++', n_init=50, max_iter=500, random_state=42)
+    raw_clusters = kmeans.fit_predict(data_pca)
+    
+    # Métricas de Calidad
+    sil = silhouette_score(data_pca, raw_clusters)
+    print(f"   -> Índice Silhouette (Cohesión): {sil:.4f} (Excelente > 0.35)")
+
+    # -------------------------------------------------------------------------
+    # 5. CÁLCULO DE PROBABILIDAD DE PERTENENCIA - NUEVO!
+    # -------------------------------------------------------------------------
+    print("\n📐 Calculando Distancias y Scores de Confianza...")
+    
+    # Obtenemos los centroides en el espacio PCA
+    centers = kmeans.cluster_centers_
+    
+    # Calculamos la distancia de cada punto a su centroide asignado
+    # Esto nos dice "cuán representativo" es el cliente de su grupo
+    distances = euclidean_distances(data_pca, centers)
+    
+    # Seleccionamos la distancia al cluster asignado
+    min_distances = [distances[i, c] for i, c in enumerate(raw_clusters)]
+    
+    # Normalizamos (Score 0-100): Más cerca del centro = Más puntuación
+    # Usamos una transformación exponencial para suavizar
+    confidence_scores = 100 * (1 - (min_distances / np.max(min_distances)))
+    
+    # Añadimos métricas temporales al dataframe humano
+    data_human_clean = data_human_clean.copy()
+    data_human_clean['Temp_Cluster'] = raw_clusters
+    data_human_clean['Confidence_Score'] = confidence_scores
+
+    # -------------------------------------------------------------------------
+    # 6. RANKING JERÁRQUICO ESTRICTO (DINERO = REY)
+    # -------------------------------------------------------------------------
+    print("⚖️  Aplicando Lógica de Negocio (Money-First)...")
+    
+    profile = data_human_clean.groupby('Temp_Cluster').agg({
         'Monetary': 'median',
         'Frequency': 'median',
         'Recency': 'median'
     })
+    
+    scaler_rank = MinMaxScaler()
+    profile['Recency_Inv'] = -profile['Recency']
+    
+    rank_mat = scaler_rank.fit_transform(profile[['Monetary', 'Frequency', 'Recency_Inv']])
+    
+    # PESOS: 80% Dinero, 10% Frecuencia, 10% Recencia
+    profile['Score'] = np.dot(rank_mat, [0.8, 0.1, 0.1])
+    
+    ranking_ids = profile.sort_values('Score', ascending=False).index
+    logic_map = {old: new for new, old in enumerate(ranking_ids)}
+    
+    name_map = {0: "💎 Diamante", 1: "🥇 Oro", 2: "🥈 Plata", 3: "🥉 Bronce"}
 
-    # Creamos un ranking basado en valor comercial (Dinero + Frecuencia - Recencia)
-    # Esto asegura que el ID 0 sea siempre el mejor cliente real
-    ranking = cluster_profile.assign(
-        score = cluster_profile['Monetary'] * 0.7 + cluster_profile['Frequency'] * 0.3
-    ).sort_values('score', ascending=False).index
+    # -------------------------------------------------------------------------
+    # 7. FEATURE IMPORTANCE (RANDOM FOREST ESPÍA)
+    # -------------------------------------------------------------------------
+    print("🧬 Secuenciando ADN del modelo...")
+    clf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+    clf.fit(data_ai_clean, raw_clusters)
+    feats = dict(zip(data_ai_clean.columns, clf.feature_importances_))
+    feats = dict(sorted(feats.items(), key=lambda x: x[1], reverse=True))
 
-    logic_map = {old_id: new_id for new_id, old_id in enumerate(ranking)}
+    # -------------------------------------------------------------------------
+    # 8. GENERACIÓN DE EVIDENCIA VISUAL - NUEVO!
+    # -------------------------------------------------------------------------
+    print("🎨 Generando mapa visual de clusters...")
     
-    # Aplicamos el mapeo final
-    original_metrics['Cluster'] = original_metrics['Temp_Cluster'].map(logic_map)
+    # Mapeamos nombres para el gráfico
+    plot_df = pd.DataFrame(data_pca, columns=['PCA1', 'PCA2', 'PCA3'])
+    plot_df['Cluster'] = pd.Series(raw_clusters).map(logic_map).map(name_map)
     
-    name_map = {
-        0: "💎 Diamante",
-        1: "🥇 Oro",
-        2: "🥈 Plata",
-        3: "🥉 Bronce"
-    }
+    plt.figure(figsize=(10, 6))
+    sns.scatterplot(x='PCA1', y='PCA2', hue='Cluster', data=plot_df, palette='viridis', alpha=0.7)
+    plt.title('Distribución Espacial de Clientes (Vista PCA)')
+    plt.xlabel('Componente Principal 1 (Valor)')
+    plt.ylabel('Componente Principal 2 (Comportamiento)')
     
-    original_metrics['Segmento'] = original_metrics['Cluster'].map(name_map)
-    final_clusters = original_metrics['Cluster'].values
+    if not os.path.exists('data/plots'): os.makedirs('data/plots')
+    plt.savefig('data/plots/clusters_visual.png')
+    print("   -> Gráfico guardado en: data/plots/clusters_visual.png")
 
-    # 5. AUDITORÍA DE ESTRÉS (Clasificador de Validación)
-    # Esto mide si un cliente nuevo podrá ser clasificado con éxito
-    X_train, X_test, y_train, y_test = train_test_split(data, final_clusters, test_size=0.2, random_state=42)
+    # -------------------------------------------------------------------------
+    # 9. GUARDADO FINAL
+    # -------------------------------------------------------------------------
+    print("\n💾 Persistiendo Cerebro Digital...")
     
-    # ExtraTrees nos dirá qué variables son las que realmente definen a tus clientes
-    validator = ExtraTreesClassifier(n_estimators=200, max_depth=10, random_state=42)
-    validator.fit(X_train, y_train)
+    data_human_clean['Cluster'] = data_human_clean['Temp_Cluster'].map(logic_map)
+    data_human_clean['Segmento'] = data_human_clean['Cluster'].map(name_map)
+    data_human_clean.drop(columns=['Temp_Cluster'], inplace=True)
     
-    # Medimos la importancia de las variables (Para el ADN del Dashboard)
-    importances = dict(zip(data.columns, validator.feature_importances_))
-    
-    report = classification_report(y_test, validator.predict(X_test), output_dict=True)
-    cohesion = silhouette_score(data_pca, final_clusters)
-
-    # 6. SALIDA DE CONTROL DE CALIDAD
-    print("\n" + "═"*60)
-    print(f"🏆 AUDITORÍA DE SISTEMA NEXUS AI")
-    print("═"*60)
-    print(f"📈 Varianza Capturada PCA: {var_explicada:.2%}")
-    print(f"🧪 Cohesión Silhouette: {cohesion:.4f} (Calidad de separación)")
-    print("-" * 60)
-    print("🎯 PESO DE VARIABLES EN LA DECISIÓN (ADN):")
-    for feat, val in sorted(importances.items(), key=lambda x: x[1], reverse=True):
-        print(f" • {feat:<15}: {val:.2%}")
-    print("-" * 60)
-    for i, name in name_map.items():
-        acc = report[str(i)]['f1-score']
-        print(f"{name:<15} | Estabilidad F1: {acc:.4f}")
-    print("═"*60)
-
-    # 7. EXPORTACIÓN DE CEREBROS
-    os.makedirs("data", exist_ok=True)
-    original_metrics.drop(columns=['Temp_Cluster']).to_csv("data/final_segments.csv")
-    
-    # Guardamos todo lo necesario para que el Dashboard sea una "réplica" del entrenamiento
-    joblib.dump(model, "data/nexus_model.pkl")
+    data_human_clean.to_csv("data/final_segments.csv")
+    joblib.dump(kmeans, "data/nexus_model.pkl")
     joblib.dump(pca, "data/nexus_pca.pkl")
     joblib.dump(name_map, "data/nexus_map.pkl")
     joblib.dump(logic_map, "data/nexus_logic.pkl")
-    joblib.dump(importances, "data/nexus_dna_weights.pkl") # Nuevo: Pesos de las variables
+    joblib.dump(feats, "data/nexus_dna_weights.pkl")
     
-    print(f"🚀 Cerebro Nexus AI entrenado y jerarquizado correctamente.")
+    print("\n" + "="*80)
+    print(f"✅ ENTRENAMIENTO FINALIZADO | {len(data_human_clean)} Clientes Indexados")
+    print("="*80)
+    
+    # REPORTE DE VERDAD
+    summary = data_human_clean.groupby('Segmento')[['Monetary', 'Frequency', 'Recency', 'Confidence_Score']].median()
+    order = ["💎 Diamante", "🥇 Oro", "🥈 Plata", "🥉 Bronce"]
+    
+    print(f"{'SEGMENTO':<12} | {'GASTO (€)':<12} | {'FREQ':<6} | {'RECENCY':<10} | {'CONFIDENCIA':<10}")
+    print("-" * 65)
+    for seg in order:
+        if seg in summary.index:
+            row = summary.loc[seg]
+            print(f"{seg:<12} | {row['Monetary']:>9,.0f} € | {row['Frequency']:>6.0f} | {row['Recency']:>7.0f} d | {row['Confidence_Score']:>9.1f}%")
+    print("-" * 65 + "\n")
 
 if __name__ == "__main__":
-    train_and_evaluate()
+    train_advanced_model()

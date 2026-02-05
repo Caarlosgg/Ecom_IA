@@ -2,96 +2,129 @@ import pandas as pd
 import numpy as np
 from scipy import stats
 import os
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import PowerTransformer
 import joblib
-import winsound
 
-def run_advanced_processor():
-    local_path = "data/raw_data.parquet"
+def run_pro_processor():
+    # Configuración de rutas
+    RAW_PATH = "data/raw_data.parquet"
+    PROCESSED_PATH = "data/rfm_processed.csv"
+    ORIGINAL_PATH = "data/rfm_original_metrics.csv"
+    SCALER_PATH = "data/nexus_scaler.pkl"
     
-    # 1. CARGA DE DATOS (Optimizado para evitar corrupción de archivos)
-    if os.path.exists(local_path):
-        print("⚡ Cargando desde cache local...")
-        df = pd.read_parquet(local_path)
+    print("🚀 INICIANDO PROTOCOLO DE PROCESAMIENTO ECOM-IA (ULTRA PRO)...")
+
+    # --- 1. CARGA INTELIGENTE Y LIMPIEZA INICIAL ---
+    if not os.path.exists('data'): 
+        os.makedirs('data')
+
+    if os.path.exists(RAW_PATH):
+        print("⚡ Cargando desde cache local (Ultrarrápido)...")
+        df = pd.read_parquet(RAW_PATH)
     else:
         url = "https://archive.ics.uci.edu/ml/machine-learning-databases/00352/Online%20Retail.xlsx"
-        print("🌐 Descargando dataset masivo...")
-        if not os.path.exists('data'): os.makedirs('data')
+        print("🌐 Descargando dataset maestro desde UCI Repository...")
         try:
-            df = pd.read_excel(url)
+            # CORRECCIÓN AQUÍ: Forzamos que StockCode y otros sean texto (str) desde el inicio
+            # Esto evita el error "Expected bytes, got int"
+            df = pd.read_excel(
+                url, 
+                dtype={'StockCode': str, 'CustomerID': str, 'InvoiceNo': str}
+            )
+            
+            # --- LIMPIEZA PROFUNDA ---
+            # 1. Eliminar filas sin Cliente
             df = df.dropna(subset=['CustomerID'])
-            cols_to_fix = ['InvoiceNo', 'StockCode', 'Description', 'CustomerID']
-            for col in cols_to_fix:
-                df[col] = df[col].astype(str).fillna('')
-            df.to_parquet(local_path, index=False)
+            
+            # 2. Limpieza de IDs (quitar decimales .0 si vinieran como string "12345.0")
+            df['CustomerID'] = df['CustomerID'].str.split('.').str[0]
+            
+            # 3. Eliminar devoluciones (Facturas que empiezan por 'C')
+            df = df[~df['InvoiceNo'].str.startswith('C')]
+            
+            # Guardar cache para la próxima
+            df.to_parquet(RAW_PATH, index=False)
         except Exception as e:
-            print(f"❌ Error en descarga: {e}")
+            print(f"❌ Error crítico en descarga: {e}")
+            print("💡 Consejo: Si el error persiste, descarga el archivo 'Online Retail.xlsx' manualmente y ponlo en la carpeta.")
             return
 
-    # 2. FEATURE ENGINEERING
+    # --- 2. INGENIERÍA DE VARIABLES (CREACIÓN DEL ADN) ---
+    print("⚙️ Generando métricas avanzadas (RFM + Profundidad)...")
+    
+    # Conversión segura a números
     df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce')
     df['UnitPrice'] = pd.to_numeric(df['UnitPrice'], errors='coerce')
+    
+    # Filtro de Negocio: Solo ventas válidas (>0)
     df = df[(df['Quantity'] > 0) & (df['UnitPrice'] > 0)]
     df['TotalSum'] = df['Quantity'] * df['UnitPrice']
     
+    # Fecha de corte
     snapshot_date = df['InvoiceDate'].max() + pd.Timedelta(days=1)
     
-    # Agregación precisa
+    # AGREGACIÓN POR CLIENTE
     rfm = df.groupby('CustomerID').agg({
-        'InvoiceDate': [lambda x: (snapshot_date - x.max()).days, 
-                        lambda x: (x.max() - x.min()).days],
-        'InvoiceNo': 'nunique',
-        'TotalSum': 'sum',
-        'StockCode': 'nunique',
-        'Quantity': 'sum'
+        'InvoiceDate': [lambda x: (snapshot_date - x.max()).days,  # Recency
+                        lambda x: (x.max() - x.min()).days],       # Tenure
+        'InvoiceNo': 'nunique',                                    # Frequency
+        'TotalSum': 'sum',                                         # Monetary
+        'StockCode': 'nunique',                                    # Diversity
+        'Quantity': 'sum'                                          # TotalQuantity
     })
     
+    # Aplanar columnas
     rfm.columns = ['Recency', 'Tenure', 'Frequency', 'Monetary', 'Diversity', 'TotalQuantity']
     
-    # Evitamos división por cero en AOV y DailySpend
-    rfm['AOV'] = rfm['Monetary'] / rfm['Frequency']
-    rfm['DailySpend'] = rfm['Monetary'] / (rfm['Tenure'] + 1)
-    
-    # 3. NORMALIZACIÓN Y FILTRO (Mejora: Manejo de Outliers antes de la serialización)
-    # Aplicamos logaritmo para reducir el skewness
-    rfm_log = np.log1p(rfm.clip(lower=0))
-    
-    # Filtro Z-Score 3.0: Mantenemos solo datos que no sean ruido estadístico
-    # Importante: Esto reduce el número de filas, por eso la re-serialización va DESPUÉS.
-    mask = (np.abs(stats.zscore(rfm_log)) < 3.0).all(axis=1)
-    rfm_log_filtered = rfm_log[mask]
-    
-    # 4. RE-SERIALIZACIÓN (Tu lógica original intacta)
-    # Aquí es donde creamos los nuevos IDs de 1 a N
-    rfm_log_filtered = rfm_log_filtered.reset_index(drop=True)
-    rfm_log_filtered.index = rfm_log_filtered.index + 1
-    rfm_log_filtered.index.name = 'CustomerID'
+    # Variables Derivadas
+    rfm['AOV'] = (rfm['Monetary'] / rfm['Frequency']).fillna(0)
+    rfm['DailySpend'] = (rfm['Monetary'] / (rfm['Tenure'] + 1)).fillna(0)
 
-    # 5. ESCALADO ESTÁNDAR
-    # Limpiamos posibles NaNs o Infinitos antes de escalar (Seguridad extra)
-    rfm_log_filtered = rfm_log_filtered.replace([np.inf, -np.inf], np.nan).fillna(0)
+    # --- 3. LIMPIEZA ESTADÍSTICA (OUTLIERS) ---
+    print("🧹 Eliminando anomalías estadísticas (Z-Score Filter)...")
+    rfm_log_temp = np.log1p(rfm)
     
-    scaler = StandardScaler()
-    rfm_scaled = pd.DataFrame(scaler.fit_transform(rfm_log_filtered), 
-                              columns=rfm_log_filtered.columns, 
-                              index=rfm_log_filtered.index)
+    # Mantenemos solo clientes "normales"
+    mask = (np.abs(stats.zscore(rfm_log_temp)) < 3.0).all(axis=1)
+    rfm_clean = rfm[mask].copy()
+    
+    deleted = len(rfm) - len(rfm_clean)
+    print(f"   -> Eliminados {deleted} clientes anómalos.")
 
-    # 6. GUARDADO DE MÉTRICAS ORIGINALES
-    # Mejora: Sincronización robusta. Filtramos el RFM original con la misma máscara
-    # y reseteamos el índice para que coincida 1:1 con rfm_scaled
-    rfm_original = rfm[mask].copy()
-    rfm_original = rfm_original.reset_index(drop=True)
-    rfm_original.index = rfm_log_filtered.index
+    # --- 4. SERIALIZACIÓN VISUAL ---
+    print("✨ Re-indexando clientes para Dashboard Visual...")
     
-    # 7. EXPORTACIÓN FINAL
-    rfm_scaled.to_csv("data/rfm_processed.csv")
-    rfm_original.to_csv("data/rfm_original_metrics.csv")
-    joblib.dump(scaler, "data/nexus_scaler.pkl")
+    rfm_clean = rfm_clean.reset_index()
+    rfm_clean = rfm_clean.rename(columns={'CustomerID': 'Real_ID'})
     
-    print(f"✅ ADN Preparado y Serializado.")
-    print(f"📊 Clientes totales: {len(rfm_scaled)}")
-    print(f"💾 Archivos guardados en /data")
+    # Índice serial limpio (1 a N)
+    rfm_clean.index = rfm_clean.index + 1
+    rfm_clean.index.name = 'Cliente_ID'
+
+    # --- 5. NORMALIZACIÓN MATEMÁTICA "PRO" (Yeo-Johnson) ---
+    print("🧪 Aplicando transformación Yeo-Johnson...")
+    
+    cols_to_scale = ['Recency', 'Tenure', 'Frequency', 'Monetary', 'Diversity', 'TotalQuantity', 'AOV', 'DailySpend']
+    
+    pt = PowerTransformer(method='yeo-johnson')
+    rfm_transformed = pt.fit_transform(rfm_clean[cols_to_scale])
+    
+    rfm_scaled = pd.DataFrame(rfm_transformed, 
+                              columns=cols_to_scale, 
+                              index=rfm_clean.index)
+
+    # --- 6. GUARDADO DE ARTEFACTOS ---
+    print("💾 Guardando sistema de archivos sincronizado...")
+    
+    rfm_scaled.to_csv(PROCESSED_PATH)
+    rfm_clean.to_csv(ORIGINAL_PATH)
+    joblib.dump(pt, SCALER_PATH)
+    
+    print("-" * 60)
+    print(f"✅ PROCESO COMPLETADO EXITOSAMENTE")
+    print(f"📊 Clientes listos: {len(rfm_scaled)}")
+    print(f"🆔 Formato Visual: IDs del 1 al {len(rfm_scaled)}")
+    print("-" * 60)
 
 if __name__ == "__main__":
-    run_advanced_processor()
-    winsound.MessageBeep()
+    run_pro_processor()
